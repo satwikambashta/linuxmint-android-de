@@ -1,4 +1,4 @@
-# Leptos DeviceConnector
+# Linux Rust Device ENvironment
 
 A minimal Rust-based Linux notification receiver with an Android companion app that forwards Android notifications over the local Wi-Fi network.
 
@@ -19,7 +19,7 @@ A minimal Rust-based Linux notification receiver with an Android companion app t
 ### Build and run
 
 ```sh
-cd /home/satwik/Projects/rust/leptos-deviceconnector
+cd leptos-deviceconnector
 cargo build --release
 ./target/release/leptos-deviceconnector --port 14353 --auth my-secret-token --notify
 ```

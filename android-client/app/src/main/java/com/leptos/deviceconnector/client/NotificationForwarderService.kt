@@ -17,47 +17,76 @@ class NotificationForwarderService : NotificationListenerService() {
         val host = config.getString("server_host", "") ?: ""
         val port = config.getInt("server_port", 14353)
         val authToken = config.getString("auth_token", "") ?: ""
+        val secure = config.getBoolean("secure_transfer", false)
 
         if (host.isEmpty()) {
             return
         }
 
-        val message = buildNotifyMessage(title.toString(), body.toString())
-        sendMessage(host, port, authToken, message)
+        if (secure && authToken.isEmpty()) {
+            return
+        }
+
+        val payload = "NOTIFY|${CryptoUtils.escapeField(title.toString())}|${CryptoUtils.escapeField(body.toString())}" 
+
+        Thread { sendMessageWithRetry(host, port, authToken, secure, payload) }.start()
     }
 
-    private fun buildNotifyMessage(title: String, body: String): String {
-        return "NOTIFY|${escapeField(title)}|${escapeField(body)}\n"
+    private fun sendMessageWithRetry(host: String, port: Int, authToken: String, secure: Boolean, payload: String) {
+        repeat(3) { attempt ->
+            if (sendMessage(host, port, authToken, secure, payload)) {
+                return
+            }
+            if (attempt < 2) {
+                try {
+                    Thread.sleep(2000)
+                } catch (_: InterruptedException) {
+                }
+            }
+        }
     }
 
-    private fun escapeField(value: String): String {
-        return value
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
-    }
-
-    private fun sendMessage(host: String, port: Int, authToken: String, payload: String) {
+    private fun sendMessage(host: String, port: Int, authToken: String, secure: Boolean, payload: String): Boolean {
         val socket = Socket()
-        try {
+        return try {
             socket.connect(InetSocketAddress(host, port), 5000)
             val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+            val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
 
             if (authToken.isNotEmpty()) {
-                writer.write("AUTH|${escapeField(authToken)}\n")
-                writer.flush()
-                val response = socket.getInputStream().bufferedReader(Charsets.UTF_8).readLine()
-                if (response != "OK") {
-                    return
+                val authLine = if (secure) {
+                    CryptoUtils.encryptPayload(authToken, "AUTH|${CryptoUtils.escapeField(authToken)}")
+                } else {
+                    "AUTH|${CryptoUtils.escapeField(authToken)}\n"
+                }
+                authLine?.let {
+                    writer.write(it)
+                    writer.flush()
+                }
+
+                val authResponse = reader.readLine() ?: return false
+                val authResult = if (secure) CryptoUtils.decryptPayload(authToken, authResponse) else authResponse
+                if (authResult != "OK") {
+                    return false
                 }
             }
 
-            writer.write(payload)
-            writer.flush()
+            val commandLine = if (secure) {
+                CryptoUtils.encryptPayload(authToken, "$payload\n")
+            } else {
+                "$payload\n"
+            }
+
+            commandLine?.let {
+                writer.write(it)
+                writer.flush()
+            }
+
+            val response = reader.readLine() ?: return false
+            val decodedResponse = if (secure) CryptoUtils.decryptPayload(authToken, response) else response
+            decodedResponse == "OK"
         } catch (_: Exception) {
-            // Ignore failures; avoid crashing notification service.
+            false
         } finally {
             try {
                 socket.close()

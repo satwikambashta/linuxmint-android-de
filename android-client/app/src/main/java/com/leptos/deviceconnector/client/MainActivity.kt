@@ -1,20 +1,18 @@
 package com.leptos.deviceconnector.client
 
 import android.app.Activity
-import android.content.ContentResolver
 import android.content.Intent
 import android.content.SharedPreferences
-import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.Toast
 import java.io.BufferedWriter
 import java.io.IOException
-import java.io.InputStream
 import java.io.OutputStreamWriter
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -31,6 +29,7 @@ class MainActivity : Activity() {
         val hostInput = findViewById<EditText>(R.id.host_input)
         val portInput = findViewById<EditText>(R.id.port_input)
         val authInput = findViewById<EditText>(R.id.auth_token_input)
+        val secureCheckbox = findViewById<CheckBox>(R.id.secure_checkbox)
         val saveButton = findViewById<Button>(R.id.save_button)
         val openSettingsButton = findViewById<Button>(R.id.open_listener_button)
         val sendFileButton = findViewById<Button>(R.id.send_file_button)
@@ -38,11 +37,13 @@ class MainActivity : Activity() {
         hostInput.setText(preferences.getString("server_host", ""))
         portInput.setText(preferences.getInt("server_port", 14353).toString())
         authInput.setText(preferences.getString("auth_token", ""))
+        secureCheckbox.isChecked = preferences.getBoolean("secure_transfer", false)
 
         saveButton.setOnClickListener {
             val host = hostInput.text.toString().trim()
             val port = portInput.text.toString().toIntOrNull() ?: -1
             val authToken = authInput.text.toString().trim()
+            val secure = secureCheckbox.isChecked
 
             if (host.isEmpty()) {
                 showToast("Please enter the Linux server host")
@@ -54,10 +55,16 @@ class MainActivity : Activity() {
                 return@setOnClickListener
             }
 
+            if (secure && authToken.isEmpty()) {
+                showToast("A non-empty auth token is required for encrypted transport")
+                return@setOnClickListener
+            }
+
             preferences.edit()
                 .putString("server_host", host)
                 .putInt("server_port", port)
                 .putString("auth_token", authToken)
+                .putBoolean("secure_transfer", secure)
                 .apply()
 
             showToast("Settings saved. Enable Notification Access next.")
@@ -102,73 +109,154 @@ class MainActivity : Activity() {
         val host = preferences.getString("server_host", "") ?: ""
         val port = preferences.getInt("server_port", 14353)
         val authToken = preferences.getString("auth_token", "") ?: ""
+        val secure = preferences.getBoolean("secure_transfer", false)
 
         if (host.isEmpty()) {
             showToast("Server host is required")
             return
         }
 
+        if (secure && authToken.isEmpty()) {
+            showToast("Encrypted transport requires an auth token")
+            return
+        }
+
         Thread {
-            sendFileToServer(host, port, authToken, uri)
+            sendFileToServer(host, port, authToken, secure, uri)
         }.start()
     }
 
-    private fun sendFileToServer(host: String, port: Int, authToken: String, uri: Uri) {
+    private fun sendFileToServer(host: String, port: Int, authToken: String, secure: Boolean, uri: Uri) {
         try {
             val fileName = queryFileName(uri) ?: "uploaded_file"
-            val fileSize = queryFileSize(uri)
-            val socket = Socket()
-
-            socket.connect(InetSocketAddress(host, port), 10000)
-            val outputStream = socket.getOutputStream()
-            val writer = BufferedWriter(OutputStreamWriter(outputStream, Charsets.UTF_8))
-            val inputStream = socket.getInputStream().bufferedReader(Charsets.UTF_8)
-
-            if (authToken.isNotEmpty()) {
-                writer.write("AUTH|${escapeField(authToken)}\n")
-                writer.flush()
-
-                val response = inputStream.readLine()
-                if (response != "OK") {
-                    showToastOnUiThread("Auth failed or server did not accept auth")
-                    socket.close()
-                    return
-                }
+            val fileBytes = readUriBytes(uri) ?: run {
+                showToastOnUiThread("Unable to read selected file")
+                return
             }
-
-            if (fileSize != null && fileSize >= 0) {
-                writer.write("FILE|${escapeField(fileName)}|${fileSize}\n")
-                writer.flush()
-                sendUriBytes(uri, outputStream)
-            } else {
-                val fileBytes = readUriBytes(uri)
-                if (fileBytes == null) {
-                    showToastOnUiThread("Unable to read selected file")
-                    socket.close()
-                    return
-                }
-                writer.write("FILE|${escapeField(fileName)}|${fileBytes.size}\n")
-                writer.flush()
-                outputStream.write(fileBytes)
-            }
-
-            outputStream.flush()
-            val response = inputStream.readLine()
-            if (response == "OK") {
+            val success = repeatSendFile(host, port, authToken, secure, fileName, fileBytes)
+            if (success) {
                 showToastOnUiThread("File sent successfully")
             } else {
-                showToastOnUiThread("File transfer failed: $response")
+                showToastOnUiThread("File transfer failed")
             }
-
-            socket.close()
         } catch (error: Exception) {
             showToastOnUiThread("File transfer error: ${error.message}")
         }
     }
 
-    private fun sendUriBytes(uri: Uri, outputStream: java.io.OutputStream) {
-        contentResolver.openInputStream(uri)?.use { input ->
-            input.copyTo(outputStream)
+    private fun repeatSendFile(host: String, port: Int, authToken: String, secure: Boolean, fileName: String, fileBytes: ByteArray): Boolean {
+        repeat(3) { attempt ->
+            if (sendFileOnce(host, port, authToken, secure, fileName, fileBytes)) {
+                return true
+            }
+            if (attempt < 2) {
+                try {
+                    Thread.sleep(2000)
+                } catch (_: InterruptedException) {
+                }
+            }
+        }
+        return false
+    }
+
+    private fun sendFileOnce(host: String, port: Int, authToken: String, secure: Boolean, fileName: String, fileBytes: ByteArray): Boolean {
+        val socket = Socket()
+        return try {
+            socket.connect(InetSocketAddress(host, port), 10000)
+            val outputStream = socket.getOutputStream()
+            val writer = BufferedWriter(OutputStreamWriter(outputStream, Charsets.UTF_8))
+            val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
+
+            if (authToken.isNotEmpty()) {
+                val authLine = if (secure) {
+                    CryptoUtils.encryptPayload(authToken, "AUTH|${CryptoUtils.escapeField(authToken)}")
+                } else {
+                    "AUTH|${CryptoUtils.escapeField(authToken)}\n"
+                }
+                authLine?.let {
+                    writer.write(it)
+                    writer.flush()
+                }
+
+                val authResponse = reader.readLine() ?: return false
+                val authResult = if (secure) CryptoUtils.decryptPayload(authToken, authResponse) else authResponse
+                if (authResult != "OK") {
+                    return false
+                }
+            }
+
+            val payload = if (secure) {
+                val encodedFile = android.util.Base64.encodeToString(fileBytes, android.util.Base64.NO_WRAP)
+                val line = "FILE|${CryptoUtils.escapeField(fileName)}|${fileBytes.size}|$encodedFile\n"
+                CryptoUtils.encryptPayload(authToken, line)
+            } else {
+                val header = "FILE|${CryptoUtils.escapeField(fileName)}|${fileBytes.size}\n"
+                writer.write(header)
+                writer.flush()
+                outputStream.write(fileBytes)
+                outputStream.flush()
+                null
+            }
+
+            if (payload != null) {
+                writer.write(payload)
+                writer.flush()
+            }
+
+            val response = reader.readLine() ?: return false
+            val decodedResponse = if (secure) CryptoUtils.decryptPayload(authToken, response) else response
+            decodedResponse == "OK"
+        } catch (_: Exception) {
+            false
+        } finally {
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun sendMessageToServer(host: String, port: Int, authToken: String, secure: Boolean, message: String): Boolean {
+        val socket = Socket()
+        return try {
+            socket.connect(InetSocketAddress(host, port), 10000)
+            val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+            val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
+
+            if (authToken.isNotEmpty()) {
+                val authLine = if (secure) {
+                    CryptoUtils.encryptPayload(authToken, "AUTH|${CryptoUtils.escapeField(authToken)}")
+                } else {
+                    "AUTH|${CryptoUtils.escapeField(authToken)}\n"
+                }
+                authLine?.let {
+                    writer.write(it)
+                    writer.flush()
+                }
+
+                val authResponse = reader.readLine() ?: return false
+                val authResult = if (secure) CryptoUtils.decryptPayload(authToken, authResponse) else authResponse
+                if (authResult != "OK") {
+                    return false
+                }
+            }
+
+            val payload = if (secure) CryptoUtils.encryptPayload(authToken, "$message\n") else "$message\n"
+            payload?.let {
+                writer.write(it)
+                writer.flush()
+            }
+
+            val response = reader.readLine() ?: return false
+            val decodedResponse = if (secure) CryptoUtils.decryptPayload(authToken, response) else response
+            decodedResponse == "OK"
+        } catch (_: Exception) {
+            false
+        } finally {
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -192,32 +280,6 @@ class MainActivity : Activity() {
             }
         }
         return name
-    }
-
-    private fun queryFileSize(uri: Uri): Long? {
-        var size: Long? = null
-        val projection = arrayOf(OpenableColumns.SIZE)
-        contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (index >= 0) {
-                    val fileSize = cursor.getLong(index)
-                    if (fileSize >= 0) {
-                        size = fileSize
-                    }
-                }
-            }
-        }
-        return size
-    }
-
-    private fun escapeField(value: String): String {
-        return value
-            .replace("\\", "\\\\")
-            .replace("|", "\\|")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")
     }
 
     private fun showToast(message: String) {

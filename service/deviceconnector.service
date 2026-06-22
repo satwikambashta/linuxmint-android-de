@@ -1,0 +1,14 @@
+[Unit]
+Description=Leptos DeviceConnector notification receiver
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/satwik/Projects/rust/leptos-deviceconnector
+ExecStart=/home/satwik/Projects/rust/leptos-deviceconnector/target/release/leptos-deviceconnector --port 14353 --auth YOUR_SECRET --notify --store-dir received_files --secure
+Restart=on-failure
+StandardOutput=append:/home/satwik/Projects/rust/leptos-deviceconnector/deviceconnector.log
+StandardError=append:/home/satwik/Projects/rust/leptos-deviceconnector/deviceconnector.log
+
+[Install]
+WantedBy=multi-user.target
