@@ -1,0 +1,7 @@
+# Android build and IDE artifacts
+.gradle/
+build/
+/captures/
+/local.properties
+*.iml
+.idea/

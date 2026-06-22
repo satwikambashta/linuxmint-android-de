@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <EditText
+        android:id="@+id/host_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Linux server host" />
+
+    <EditText
+        android:id="@+id/port_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Port (14353)"
+        android:inputType="number" />
+
+    <EditText
+        android:id="@+id/auth_token_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Auth token (optional)" />
+
+    <Button
+        android:id="@+id/save_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Save settings" />
+
+    <Button
+        android:id="@+id/open_listener_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Open notification access settings" />
+</LinearLayout>
