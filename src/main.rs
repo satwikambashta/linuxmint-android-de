@@ -1,7 +1,8 @@
 use std::env;
-use std::fs;
-use std::io::{self, BufRead, BufReader, Write};
+use std::fs::{self, File};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::thread;
@@ -10,17 +11,20 @@ struct Config {
     bind_address: String,
     auth_token: Option<String>,
     notify_desktop: bool,
+    receive_dir: String,
 }
 
 enum ServerMessage {
     Auth(String),
     Notify { title: String, body: String },
+    File { name: String, size: usize },
     Ping,
     Unknown(String),
 }
 
 fn main() -> io::Result<()> {
     let config = parse_args();
+    fs::create_dir_all(&config.receive_dir)?;
     println!("Starting notification server on {}", config.bind_address);
     let listener = TcpListener::bind(&config.bind_address)?;
     let config = Arc::new(config);
@@ -48,6 +52,7 @@ fn parse_args() -> Config {
     let mut bind_address = String::from("0.0.0.0:14353");
     let mut auth_token = None;
     let mut notify_desktop = false;
+    let mut receive_dir = String::from("received_files");
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -79,6 +84,14 @@ fn parse_args() -> Config {
             "--notify" | "-n" => {
                 notify_desktop = true;
             }
+            "--store-dir" | "--dir" => {
+                if let Some(dir) = args.next() {
+                    receive_dir = dir;
+                } else {
+                    eprintln!("Missing value after {}", arg);
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
@@ -95,6 +108,7 @@ fn parse_args() -> Config {
         bind_address,
         auth_token,
         notify_desktop,
+        receive_dir,
     }
 }
 
@@ -106,6 +120,9 @@ fn print_usage() {
     println!("  -b, --bind <address>     Bind address (default 0.0.0.0)");
     println!("  -a, --auth <token>       Require auth token from clients");
     println!("  -n, --notify             Try to deliver desktop notifications with notify-send");
+    println!(
+        "  --store-dir <dir>        Directory to save received files (default received_files)"
+    );
     println!("  -h, --help               Show this help message");
 }
 
@@ -163,6 +180,15 @@ fn handle_connection(stream: TcpStream, config: Arc<Config>) -> io::Result<()> {
                 writer.write_all(b"OK\n")?;
                 writer.flush()?;
             }
+            ServerMessage::File { name, size } => {
+                if let Err(err) = handle_file(&mut reader, &mut writer, &name, size, &config, &peer)
+                {
+                    let response = format!("ERROR file transfer failed: {}\n", err);
+                    writer.write_all(response.as_bytes())?;
+                    writer.flush()?;
+                    eprintln!("Failed receiving file from {}: {}", peer, err);
+                }
+            }
             ServerMessage::Ping => {
                 writer.write_all(b"PONG\n")?;
                 writer.flush()?;
@@ -183,6 +209,56 @@ fn handle_connection(stream: TcpStream, config: Arc<Config>) -> io::Result<()> {
     Ok(())
 }
 
+fn handle_file(
+    reader: &mut BufReader<TcpStream>,
+    writer: &mut TcpStream,
+    file_name: &str,
+    file_size: usize,
+    config: &Config,
+    peer: &str,
+) -> io::Result<()> {
+    let safe_name = sanitize_filename(file_name);
+    let target_path = Path::new(&config.receive_dir).join(safe_name);
+    let mut file = File::create(&target_path)?;
+    let mut remaining = file_size;
+    let mut buffer = [0u8; 8192];
+
+    while remaining > 0 {
+        let read_size = std::cmp::min(remaining, buffer.len());
+        reader.read_exact(&mut buffer[..read_size])?;
+        file.write_all(&buffer[..read_size])?;
+        remaining -= read_size;
+    }
+
+    writer.write_all(b"OK\n")?;
+    writer.flush()?;
+    println!(
+        "Received file from {}: {} bytes saved to {}",
+        peer,
+        file_size,
+        target_path.display()
+    );
+    Ok(())
+}
+
+fn sanitize_filename(name: &str) -> String {
+    let last_component = name
+        .rsplit(|c| c == '/' || c == '\\')
+        .next()
+        .unwrap_or(name);
+
+    last_component
+        .chars()
+        .map(|ch| {
+            if ch == '/' || ch == '\\' || ch == '\0' {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
 fn parse_message(line: &str) -> ServerMessage {
     let fields = split_escaped(line, '|');
     let command = fields.get(0).map(|s| s.as_str()).unwrap_or("");
@@ -196,6 +272,14 @@ fn parse_message(line: &str) -> ServerMessage {
             let title = decode_field(&fields[1]);
             let body = decode_field(&fields[2]);
             ServerMessage::Notify { title, body }
+        }
+        "FILE" if fields.len() == 3 => {
+            let name = decode_field(&fields[1]);
+            if let Ok(size) = fields[2].parse::<usize>() {
+                ServerMessage::File { name, size }
+            } else {
+                ServerMessage::Unknown(command.to_string())
+            }
         }
         "PING" => ServerMessage::Ping,
         _ => ServerMessage::Unknown(command.to_string()),

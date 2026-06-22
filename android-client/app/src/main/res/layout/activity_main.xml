@@ -35,4 +35,10 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Open notification access settings" />
+
+    <Button
+        android:id="@+id/send_file_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Send file to Linux server" />
 </LinearLayout>

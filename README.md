@@ -45,6 +45,7 @@ Supported commands:
 
 - `AUTH|<token>`
 - `NOTIFY|<title>|<body>`
+- `FILE|<filename>|<size>`
 - `PING`
 
 Escape rules for fields:
@@ -92,7 +93,7 @@ If the Gradle wrapper is missing, Android Studio will prompt to generate or conf
 On Linux Mint:
 
 ```sh
-cargo run --release -- --port 14353 --auth super-secret-token --notify
+cargo run --release -- --port 14353 --auth super-secret-token --notify --store-dir received_files
 ```
 
 On Android:
@@ -100,6 +101,17 @@ On Android:
 - Host: `192.168.1.12`
 - Port: `14353`
 - Auth token: `super-secret-token`
+
+## File transfer
+
+The Android app now supports file transfer via the "Send file to Linux server" button.
+
+1. Tap "Send file to Linux server".
+2. Choose any file from the Android file picker.
+3. The app sends `FILE|<filename>|<size>` and then the raw byte payload.
+4. The Linux server saves files into the configured `--store-dir` directory.
+
+The default receive directory is `received_files` in the server working directory.
 
 ## Security notes
 
